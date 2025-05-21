@@ -63,7 +63,7 @@ static inline void convert_to_24(drmModeFB *fb, uint24_t *to, void *from)
 	}
 }
 
-static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn)
+static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn, int plane)
 {
 	png_bytep *row_pointers;
 	png_structp png;
@@ -72,6 +72,7 @@ static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn)
 	void *buffer, *picture;
 	unsigned int i;
 	int ret;
+	char filename[64];
 
 	picture = malloc(fb->width * fb->height * 4);
 	if (!picture)
@@ -88,7 +89,8 @@ static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn)
 	/* Drop privileges, to write PNG with user rights */
 	seteuid(getuid());
 
-	pngfile = fopen(png_fn, "w+");
+	sprintf(filename, "%s-%u.png", png_fn, plane);
+	pngfile = fopen(filename, "w+");
 	if (!pngfile) {
 		ret = -errno;
 		goto out_unmap_buffer;
@@ -207,34 +209,30 @@ int main(int argc, char **argv)
 		crtc_id = plane->crtc_id;
 		drmModeFreePlane(plane);
 
-		if (fb_id != 0 && crtc_id != 0)
-			break;
-	}
+		if (!fb_id || !crtc_id)
+			continue;
 
-	if (i == plane_res->count_planes) {
-		fprintf(stderr, "No planes found\n");
-		goto out_free_resources;
-	}
 
-	fb = drmModeGetFB(drm_fd, fb_id);
-	if (!fb) {
-		fprintf(stderr, "Failed to get framebuffer %"PRIu32": %s\n",
-			fb_id, strerror(errno));
-		goto out_free_resources;
-	}
+		fb = drmModeGetFB(drm_fd, fb_id);
+		if (!fb) {
+			fprintf(stderr, "Failed to get framebuffer %"PRIu32": %s\n",
+				fb_id, strerror(errno));
+			goto out_free_resources;
+		}
 
-	err = drmPrimeHandleToFD(drm_fd, fb->handle, O_RDONLY, &prime_fd);
-	if (err < 0) {
-		fprintf(stderr, "Failed to retrieve prime handler: %s\n",
-			strerror(-err));
-		goto out_free_fb;
-	}
+		err = drmPrimeHandleToFD(drm_fd, fb->handle, O_RDONLY, &prime_fd);
+		if (err < 0) {
+			fprintf(stderr, "Failed to retrieve prime handler: %s\n",
+				strerror(-err));
+			goto out_free_fb;
+		}
 
-	err = save_png(fb, prime_fd, argv[1]);
-	if (err < 0) {
-		fprintf(stderr, "Failed to take screenshot: %s\n",
-			strerror(-err));
-		goto out_close_prime_fd;
+		err = save_png(fb, prime_fd, argv[1], i);
+		if (err < 0) {
+			fprintf(stderr, "Failed to take screenshot: %s\n",
+				strerror(-err));
+			goto out_close_prime_fd;
+		}
 	}
 
 	retval = EXIT_SUCCESS;
