@@ -63,89 +63,50 @@ static inline void convert_to_24(drmModeFB *fb, uint24_t *to, void *from)
 	}
 }
 
-static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn, int plane)
+static int save_png(drmModeFB2 *fb2, int drm_fd, const char *png_fn, int plane)
 {
 	png_bytep *row_pointers;
 	png_structp png;
 	png_infop info;
 	FILE *pngfile;
 	void *buffer, *picture;
-	unsigned int i;
-	int ret;
+	unsigned int size, p;
+	int ret, err, prime_fd;
 	char filename[64];
 
-	picture = malloc(fb->width * fb->height * 4);
-	if (!picture)
-		return -ENOMEM;
-
-	buffer = mmap(NULL, (fb->bpp >> 3) * fb->width * fb->height,
-		      PROT_READ, MAP_PRIVATE, prime_fd, 0);
-	if (buffer == MAP_FAILED) {
-		ret = -errno;
-		fprintf(stderr, "Unable to mmap prime buffer\n");
-		goto out_free_picture;
-	}
-
-	/* Drop privileges, to write PNG with user rights */
-	seteuid(getuid());
-
-	sprintf(filename, "%s-%u.png", png_fn, plane);
+	sprintf(filename, "%s-%u.raw", png_fn, plane);
 	pngfile = fopen(filename, "w+");
 	if (!pngfile) {
+		fprintf(stderr, "Failed to open output file: %s\n",
+			strerror(-err));
 		ret = -errno;
-		goto out_unmap_buffer;
+		return ret;
 	}
 
-	png = png_create_write_struct(PNG_LIBPNG_VER_STRING,
-				NULL, NULL, NULL);
-	if (!png) {
-		ret = -errno;
-		goto out_fclose;
+	for (p = 0; p < 4; p++) {
+		if (!fb2->handles[p])
+			continue;
+		err = drmPrimeHandleToFD(drm_fd, fb2->handles[p], O_RDONLY, &prime_fd);
+		if (err < 0) {
+			continue;
+		}
+
+		// Assume planes are subsampled as I can't think of the function calls
+		// to get this information in userspace
+		size = fb2->pitches[p] * fb2->height / (!p ? 1 : 2);
+		buffer = mmap(NULL, size,
+			      PROT_READ, MAP_PRIVATE, prime_fd, 0);
+		if (buffer == MAP_FAILED) {
+			ret = -errno;
+			fprintf(stderr, "Unable to mmap prime buffer plane %u\n", p);
+		} else {
+			fwrite(buffer, size, 1, pngfile);
+
+			munmap(buffer, size);
+		}
+		close(prime_fd);
 	}
-
-	info = png_create_info_struct(png);
-	if (!info) {
-		ret = -errno;
-		goto out_free_png;
-	}
-
-	png_init_io(png, pngfile);
-	png_set_IHDR(png, info, fb->width, fb->height, 8,
-				PNG_COLOR_TYPE_RGB,
-				PNG_INTERLACE_NONE,
-				PNG_COMPRESSION_TYPE_BASE,
-				PNG_FILTER_TYPE_BASE);
-	png_write_info(png, info);
-
-	// Convert the picture to a format that can be written into the PNG file (rgb888)
-	convert_to_24(fb, picture, buffer);
-
-	row_pointers = malloc(sizeof(*row_pointers) * fb->height);
-	if (!row_pointers) {
-		ret = -ENOMEM;
-		goto out_free_info;
-	}
-
-	// And save the final image
-	for (i = 0; i < fb->height; i++)
-		row_pointers[i] = picture + i * fb->width * 3;
-
-	png_write_image(png, row_pointers);
-	png_write_end(png, info);
-
-	ret = 0;
-
-	free(row_pointers);
-out_free_info:
-	png_destroy_write_struct(NULL, &info);
-out_free_png:
-	png_destroy_write_struct(&png, NULL);
-out_fclose:
 	fclose(pngfile);
-out_unmap_buffer:
-	munmap(buffer, (fb->bpp >> 3) * fb->width * fb->height);
-out_free_picture:
-	free(picture);
 	return ret;
 }
 
@@ -157,6 +118,7 @@ int main(int argc, char **argv)
 	drmModePlaneRes *plane_res;
 	drmModePlane *plane;
 	drmModeFB *fb;
+	drmModeFB2Ptr fb2;
 	char buf[256];
 	uint64_t has_dumb;
 
@@ -213,21 +175,14 @@ int main(int argc, char **argv)
 			continue;
 
 
-		fb = drmModeGetFB(drm_fd, fb_id);
-		if (!fb) {
+		fb2 = drmModeGetFB2(drm_fd, fb_id);
+		if (!fb2) {
 			fprintf(stderr, "Failed to get framebuffer %"PRIu32": %s\n",
 				fb_id, strerror(errno));
 			goto out_free_resources;
 		}
 
-		err = drmPrimeHandleToFD(drm_fd, fb->handle, O_RDONLY, &prime_fd);
-		if (err < 0) {
-			fprintf(stderr, "Failed to retrieve prime handler: %s\n",
-				strerror(-err));
-			goto out_free_fb;
-		}
-
-		err = save_png(fb, prime_fd, argv[1], i);
+		err = save_png(fb2, drm_fd, argv[1], i);
 		if (err < 0) {
 			fprintf(stderr, "Failed to take screenshot: %s\n",
 				strerror(-err));
